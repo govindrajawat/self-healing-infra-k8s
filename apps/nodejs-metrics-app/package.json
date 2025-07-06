@@ -1,0 +1,26 @@
+{
+  "name": "nodejs-metrics-app",
+  "version": "1.0.0",
+  "description": "Sample Node.js application with Prometheus metrics for self-healing demo",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "prom-client": "^14.2.0",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.22"
+  },
+  "keywords": [
+    "kubernetes",
+    "prometheus",
+    "metrics",
+    "self-healing"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+} 

@@ -1,0 +1,58 @@
+Self-Healing Kubernetes Infrastructure Architecture
+==================================================
+
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Sample App    │    │   Prometheus    │    │ Alertmanager    │
+│   (Node.js)     │───▶│   + Rules       │───▶│   + Webhook     │
+│                 │    │                 │    │                 │
+│ • /metrics      │    │ • Scrapes       │    │ • Routes        │
+│ • /health       │    │ • Alerts        │    │ • Groups        │
+│ • /simulate/*   │    │ • Stores        │    │ • Notifies      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Grafana       │    │   Custom        │    │   Kubernetes    │
+│   Dashboards    │    │   Operator      │    │   API Server    │
+│                 │    │                 │    │                 │
+│ • Overview      │    │ • Webhook       │    │ • Pods          │
+│ • Metrics       │    │ • Recovery      │    │ • Deployments   │
+│ • Alerts        │    │ • Actions       │    │ • Services      │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+
+Data Flow:
+----------
+1. App generates metrics → Prometheus scrapes
+2. Prometheus evaluates rules → Alerts fire
+3. Alertmanager receives alerts → Routes to webhook
+4. Operator receives webhook → Executes recovery
+5. Kubernetes applies recovery → App returns healthy
+
+Recovery Actions:
+-----------------
+• restart: Delete pod (Kubernetes recreates)
+• redeploy: Trigger rolling update
+• scale: Increase replica count
+
+Alert Rules:
+------------
+• HighMemoryUsage: >200MB for 1m → restart
+• PodCrashLooping: >3 restarts in 5m → redeploy
+• HighErrorRate: >10% 5xx errors → restart
+• PodNotReady: Running but not ready → restart
+• HighCPUUsage: >80% CPU → scale
+
+Failure Simulations:
+--------------------
+• Memory leak: POST /simulate/memory-leak
+• Pod crash: POST /simulate/crash
+• High errors: POST /simulate/errors
+• High CPU: CPU-intensive tasks
+
+Access Points:
+--------------
+• Grafana: http://localhost:3000 (admin/admin)
+• Prometheus: http://localhost:9090
+• Alertmanager: http://localhost:9093
+• Node.js App: http://localhost:8080 
