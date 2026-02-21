@@ -1,181 +1,131 @@
 const express = require('express');
 const promClient = require('prom-client');
-const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS
-app.use(cors());
 app.use(express.json());
 
-// Prometheus metrics setup
+// --- Prometheus metrics ---
 const register = promClient.register;
-promClient.collectDefaultMetrics({ register });
+promClient.collectDefaultMetrics({ register }); // includes process_cpu_seconds_total, etc.
 
-// Custom metrics
 const httpRequestsTotal = new promClient.Counter({
   name: 'http_requests_total',
-  help: 'Total number of HTTP requests',
+  help: 'Total HTTP requests',
   labelNames: ['method', 'route', 'status']
 });
 
-const httpRequestDuration = new promClient.Histogram({
-  name: 'http_request_duration_seconds',
-  help: 'HTTP request duration in seconds',
-  labelNames: ['method', 'route']
-});
-
-const memoryUsage = new promClient.Gauge({
+const memoryGauge = new promClient.Gauge({
   name: 'app_memory_usage_bytes',
-  help: 'Application memory usage in bytes'
+  help: 'Heap memory used by the app'
 });
 
-// Global variables for failure simulation
-let shouldCrash = false;
-let shouldReturnErrors = false;
-let memoryLeak = false;
-let memoryLeakArray = [];
+const crashCounter = new promClient.Counter({
+  name: 'app_crash_simulations_total',
+  help: 'Number of crash simulations triggered'
+});
 
-// Middleware to track requests
+// --- Simulation state ---
+let shouldCrash       = false;
+let shouldReturnErrors = false;
+let memoryLeak        = false;
+let memoryLeakArray   = [];
+
+// Middleware: count every request
 app.use((req, res, next) => {
-  const start = Date.now();
-  
   res.on('finish', () => {
-    const duration = (Date.now() - start) / 1000;
-    httpRequestsTotal.inc({ method: req.method, route: req.route?.path || req.path, status: res.statusCode });
-    httpRequestDuration.observe({ method: req.method, route: req.route?.path || req.path }, duration);
+    httpRequestsTotal.inc({
+      method: req.method,
+      route: req.route?.path || req.path,
+      status: res.statusCode
+    });
   });
-  
   next();
 });
 
-// Health check endpoint
+// --- Core endpoints ---
+
 app.get('/health', (req, res) => {
   if (shouldCrash) {
+    console.log('Crash triggered by liveness probe — exiting');
     process.exit(1);
   }
-  
-  res.json({
-    status: 'healthy',
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime(),
-    memory: process.memoryUsage()
-  });
+  res.json({ status: 'healthy', uptime: process.uptime() });
 });
 
-// Metrics endpoint
 app.get('/metrics', async (req, res) => {
-  try {
-    // Update memory usage metric
-    const memUsage = process.memoryUsage();
-    memoryUsage.set(memUsage.heapUsed);
-    
-    res.set('Content-Type', register.contentType);
-    res.end(await register.metrics());
-  } catch (err) {
-    res.status(500).end(err);
-  }
+  memoryGauge.set(process.memoryUsage().heapUsed);
+  res.set('Content-Type', register.contentType);
+  res.end(await register.metrics());
 });
 
-// Main API endpoints
 app.get('/', (req, res) => {
-  if (shouldReturnErrors && Math.random() < 0.3) {
-    res.status(500).json({ error: 'Simulated server error' });
-  } else {
-    res.json({
-      message: 'Hello from Self-Healing Demo App!',
-      version: '1.0.0',
-      timestamp: new Date().toISOString()
-    });
+  if (shouldReturnErrors && Math.random() < 0.5) {
+    return res.status(500).json({ error: 'Simulated 500 error' });
   }
+  res.json({ message: 'Self-Healing Demo App', version: '1.0.0' });
 });
 
 app.get('/api/data', (req, res) => {
-  if (shouldReturnErrors && Math.random() < 0.2) {
-    res.status(503).json({ error: 'Service temporarily unavailable' });
-  } else {
-    res.json({
-      data: [
-        { id: 1, name: 'Item 1' },
-        { id: 2, name: 'Item 2' },
-        { id: 3, name: 'Item 3' }
-      ],
-      count: 3
-    });
+  if (shouldReturnErrors && Math.random() < 0.5) {
+    return res.status(503).json({ error: 'Simulated 503 error' });
   }
+  res.json({ items: ['Item 1', 'Item 2', 'Item 3'] });
 });
 
-// Failure simulation endpoints
+// --- Simulation endpoints ---
+
 app.post('/simulate/crash', (req, res) => {
   shouldCrash = true;
-  res.json({ message: 'Crash simulation enabled. Next health check will crash the app.' });
+  crashCounter.inc();
+  res.json({ message: 'Crash armed — next /health call will exit the process' });
 });
 
 app.post('/simulate/errors', (req, res) => {
   shouldReturnErrors = true;
-  res.json({ message: 'Error simulation enabled. API calls will randomly return 5xx errors.' });
+  res.json({ message: 'Error mode ON — 50% of API calls will return 5xx' });
 });
 
 app.post('/simulate/memory-leak', (req, res) => {
+  if (memoryLeak) {
+    return res.json({ message: 'Memory leak already running' });
+  }
   memoryLeak = true;
-  // Start memory leak
   const interval = setInterval(() => {
-    if (memoryLeak) {
-      memoryLeakArray.push(new Array(1000000).fill('leak'));
-    } else {
-      clearInterval(interval);
-    }
+    if (!memoryLeak) { clearInterval(interval); return; }
+    memoryLeakArray.push(new Array(500000).fill('x')); // ~4MB per tick
   }, 1000);
-  
-  res.json({ message: 'Memory leak simulation started.' });
+  res.json({ message: 'Memory leak started — growing ~4MB/s' });
 });
 
 app.post('/simulate/stop', (req, res) => {
-  shouldCrash = false;
+  shouldCrash        = false;
   shouldReturnErrors = false;
-  memoryLeak = false;
-  memoryLeakArray = [];
-  
-  // Force garbage collection if available
-  if (global.gc) {
-    global.gc();
-  }
-  
-  res.json({ message: 'All simulations stopped.' });
+  memoryLeak         = false;
+  memoryLeakArray    = [];
+  if (global.gc) global.gc();
+  res.json({ message: 'All simulations stopped' });
 });
 
-// Status endpoint
+// Returns the current simulation state — useful for debugging
 app.get('/status', (req, res) => {
   res.json({
     shouldCrash,
     shouldReturnErrors,
     memoryLeak,
-    memoryLeakArrayLength: memoryLeakArray.length,
-    memoryUsage: process.memoryUsage()
+    memoryLeakMB: (memoryLeakArray.length * 4).toFixed(1),
+    heapUsedMB: (process.memoryUsage().heapUsed / 1024 / 1024).toFixed(1)
   });
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({ error: 'Something went wrong!' });
-});
-
-// Start server
+// --- Start ---
 app.listen(PORT, () => {
-  console.log(`🚀 Self-Healing Demo App running on port ${PORT}`);
-  console.log(`📊 Metrics available at http://localhost:${PORT}/metrics`);
-  console.log(`❤️  Health check at http://localhost:${PORT}/health`);
+  console.log(`Self-Healing Demo App listening on port ${PORT}`);
+  console.log(`  /metrics  — Prometheus metrics`);
+  console.log(`  /health   — Health check (K8s liveness probe)`);
+  console.log(`  /status   — Current simulation state`);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
-  process.exit(0);
-}); 
+process.on('SIGTERM', () => { console.log('SIGTERM — shutting down'); process.exit(0); });
+process.on('SIGINT',  () => { console.log('SIGINT — shutting down');  process.exit(0); });

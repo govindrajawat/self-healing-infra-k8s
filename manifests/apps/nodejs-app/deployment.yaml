@@ -5,7 +5,7 @@ metadata:
   labels:
     app: nodejs-app
 spec:
-  replicas: 2
+  replicas: 1   # 1 replica keeps simulation predictable; operator can scale up if needed
   selector:
     matchLabels:
       app: nodejs-app
@@ -21,6 +21,7 @@ spec:
       containers:
       - name: nodejs-app
         image: your-repo/nodejs-metrics-app:latest
+        imagePullPolicy: IfNotPresent   # use local image if already loaded (e.g. minikube image load)
         ports:
         - containerPort: 3000
           name: http
@@ -30,14 +31,14 @@ spec:
             cpu: "500m"
           requests:
             memory: "128Mi"
-            cpu: "250m"
+            cpu: "100m"
         livenessProbe:
           httpGet:
             path: /health
             port: 3000
-          initialDelaySeconds: 30
+          initialDelaySeconds: 15
           periodSeconds: 10
-          timeoutSeconds: 5
+          timeoutSeconds: 3
           failureThreshold: 3
         readinessProbe:
           httpGet:
