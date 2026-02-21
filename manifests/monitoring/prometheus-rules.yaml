@@ -8,71 +8,20 @@ data:
     groups:
     - name: self-healing
       rules:
+
+      # Fires when the Node.js app reports high heap memory via its own metric
       - alert: HighMemoryUsage
-        expr: container_memory_usage_bytes{container="nodejs-app"} > 200000000
+        expr: app_memory_usage_bytes{job="nodejs-app"} > 200000000
         for: 1m
         labels:
           severity: critical
           recovery_action: "restart"
           app: "nodejs-app"
         annotations:
-          summary: "High memory usage in {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} is using {{ $value | humanize }}B memory"
-          
-      - alert: PodCrashLooping
-        expr: increase(kube_pod_container_status_restarts_total{container="nodejs-app"}[5m]) > 3
-        for: 2m
-        labels:
-          severity: critical
-          recovery_action: "redeploy"
-          app: "nodejs-app"
-        annotations:
-          summary: "Pod {{ $labels.pod }} is crash looping"
-          description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in the last 5 minutes"
-          
-      - alert: HighErrorRate
-        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.1
-        for: 1m
-        labels:
-          severity: critical
-          recovery_action: "restart"
-          app: "nodejs-app"
-        annotations:
-          summary: "High error rate detected"
-          description: "Error rate is {{ $value | humanizePercentage }} over the last 5 minutes"
-          
-      - alert: PodNotReady
-        expr: kube_pod_status_phase{phase="Running"} == 1 and kube_pod_status_ready{condition="true"} == 0
-        for: 2m
-        labels:
-          severity: critical
-          recovery_action: "restart"
-        annotations:
-          summary: "Pod {{ $labels.pod }} is not ready"
-          description: "Pod {{ $labels.pod }} is running but not ready"
-          
-      - alert: HighCPUUsage
-        expr: rate(container_cpu_usage_seconds_total{container="nodejs-app"}[5m]) * 100 > 80
-        for: 2m
-        labels:
-          severity: warning
-          recovery_action: "scale"
-          app: "nodejs-app"
-        annotations:
-          summary: "High CPU usage in {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} is using {{ $value | humanizePercentage }} CPU"
-          
-      - alert: PodOOMKilled
-        expr: increase(container_oom_events_total{container="nodejs-app"}[5m]) > 0
-        for: 0m
-        labels:
-          severity: critical
-          recovery_action: "restart"
-          app: "nodejs-app"
-        annotations:
-          summary: "Pod {{ $labels.pod }} was OOM killed"
-          description: "Pod {{ $labels.pod }} was killed due to out of memory"
-          
+          summary: "High memory usage in {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanize }}B"
+
+      # Fires when the nodejs-app stops exposing metrics (scrape fails)
       - alert: HealthCheckFailed
         expr: up{job="nodejs-app"} == 0
         for: 1m
@@ -81,5 +30,29 @@ data:
           recovery_action: "restart"
           app: "nodejs-app"
         annotations:
-          summary: "Health check failed for {{ $labels.instance }}"
-          description: "Health check endpoint is not responding"
+          summary: "nodejs-app is down ({{ $labels.instance }})"
+          description: "Prometheus cannot scrape the nodejs-app metrics endpoint"
+
+      # Fires when the 5xx error rate is too high
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{job="nodejs-app", status=~"5.."}[5m]) > 0.1
+        for: 1m
+        labels:
+          severity: critical
+          recovery_action: "restart"
+          app: "nodejs-app"
+        annotations:
+          summary: "High 5xx error rate on nodejs-app"
+          description: "Error rate is {{ $value | humanize }} req/s over the last 5 minutes"
+
+      # Fires when CPU usage is high - scales the deployment up
+      - alert: HighCPUUsage
+        expr: rate(process_cpu_seconds_total{job="nodejs-app"}[5m]) * 100 > 80
+        for: 2m
+        labels:
+          severity: warning
+          recovery_action: "scale"
+          app: "nodejs-app"
+        annotations:
+          summary: "High CPU usage on nodejs-app"
+          description: "CPU usage is {{ $value }}% over the last 5 minutes"

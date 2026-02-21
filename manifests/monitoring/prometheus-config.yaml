@@ -19,6 +19,7 @@ data:
               - alertmanager:9093
 
     scrape_configs:
+      # Scrape pods that have prometheus.io/scrape=true annotation
       - job_name: 'kubernetes-pods'
         kubernetes_sd_configs:
           - role: pod
@@ -39,46 +40,21 @@ data:
             regex: __meta_kubernetes_pod_label_(.+)
           - source_labels: [__meta_kubernetes_namespace]
             action: replace
-            target_label: kubernetes_namespace
+            target_label: namespace
           - source_labels: [__meta_kubernetes_pod_name]
             action: replace
-            target_label: kubernetes_pod_name
+            target_label: pod
 
-      - job_name: 'kubernetes-service-endpoints'
-        kubernetes_sd_configs:
-          - role: endpoints
-        relabel_configs:
-          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scrape]
-            action: keep
-            regex: true
-          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_scheme]
-            action: replace
-            target_label: __scheme__
-            regex: (https?)
-          - source_labels: [__meta_kubernetes_service_annotation_prometheus_io_path]
-            action: replace
-            target_label: __metrics_path__
-            regex: (.+)
-          - source_labels: [__address__, __meta_kubernetes_service_annotation_prometheus_io_port]
-            action: replace
-            regex: ([^:]+)(?::\d+)?;(\d+)
-            replacement: $1:$2
-            target_label: __address__
-          - action: labelmap
-            regex: __meta_kubernetes_service_label_(.+)
-          - source_labels: [__meta_kubernetes_namespace]
-            action: replace
-            target_label: kubernetes_namespace
-          - source_labels: [__meta_kubernetes_service_name]
-            action: replace
-            target_label: kubernetes_name
-
-      - job_name: 'kube-state-metrics'
-        static_configs:
-          - targets: ['kube-state-metrics.kube-system.svc.cluster.local:8080']
-
+      # Direct scrape of the Node.js app service
       - job_name: 'nodejs-app'
         static_configs:
           - targets: ['nodejs-app.default.svc.cluster.local:3000']
         metrics_path: /metrics
-        scrape_interval: 10s 
+        scrape_interval: 10s
+
+      # Scrape the self-healing operator itself
+      - job_name: 'self-healing-operator'
+        static_configs:
+          - targets: ['self-healing-operator.default.svc.cluster.local:8080']
+        metrics_path: /health
+        scrape_interval: 30s

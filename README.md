@@ -1,211 +1,136 @@
-# Self-Healing Kubernetes Infrastructure 🚀
+# Self-Healing Kubernetes Infrastructure
 
-[![Kubernetes](https://img.shields.io/badge/Kubernetes-1.25+-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
-[![Prometheus](https://img.shields.io/badge/Prometheus-2.40+-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io/)
-[![Go](https://img.shields.io/badge/Go-1.19+-00ADD8?logo=go&logoColor=white)](https://golang.org/)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+Automatically detect and recover from failures in Kubernetes using Prometheus alerts and a simple Go webhook operator.
 
-Automatically detect and recover from failures in Kubernetes using Prometheus alerts and custom recovery logic.
-
-## 🎯 Features
-
-- 🚨 **Smart Alerting**: Monitor pod crashes, high memory usage, and 5xx errors
-- 🔄 **Auto-Recovery**: Automatically restart pods or redeploy deployments
-- 📊 **Real-time Monitoring**: Grafana dashboards with alert visualizations
-- 🎮 **Failure Simulation**: Easy-to-use scripts to test recovery scenarios
-- 🔧 **Custom Operator**: Go-based webhook receiver for intelligent recovery decisions
-
-## 🏗️ Architecture
+## How It Works
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Sample App    │    │   Prometheus    │    │ Alertmanager    │
-│   (Node.js)     │───▶│   + Rules       │───▶│   + Webhook     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Grafana       │    │   Custom        │    │   Kubernetes    │
-│   Dashboards    │    │   Operator      │    │   API Server    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+Node.js App  →  Prometheus  →  Alertmanager  →  Self-Healing Operator
+   (metrics)       (rules)        (webhook)          (restart/redeploy)
 ```
 
-## 🚀 Quick Start
+1. The **Node.js app** exposes Prometheus metrics at `/metrics`
+2. **Prometheus** evaluates alert rules (high memory, crashes, errors)
+3. **Alertmanager** sends a webhook to the operator when an alert fires
+4. The **operator** takes a recovery action (restart pod, redeploy, or scale up)
 
-### Prerequisites
+## Prerequisites
 
-- Kubernetes cluster (minikube, kind, or cloud)
-- kubectl configured
-- Helm 3.x
+- A running Kubernetes cluster (minikube or kind works fine)
+- `kubectl` configured to connect to the cluster
+- Docker (to build images)
 
-### 1. Deploy the Infrastructure
+## Quick Start
+
+### 1. Build Docker images
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/self-healing-infra-k8s.git
-cd self-healing-infra-k8s
+# Set DOCKER_REGISTRY to your Docker Hub username or registry
+make build DOCKER_REGISTRY=myusername
+```
 
-# Deploy everything
+### 2. Push images (if using a remote registry)
+
+```bash
+docker push myusername/self-healing-operator:latest
+docker push myusername/nodejs-metrics-app:latest
+```
+
+> If using minikube, you can load images directly:
+> ```bash
+> minikube image load myusername/self-healing-operator:latest
+> minikube image load myusername/nodejs-metrics-app:latest
+> ```
+
+### 3. Update image names in manifests
+
+Edit `manifests/apps/nodejs-app/deployment.yaml` and `manifests/operator/deployment.yaml`
+and replace `your-repo/...` with your actual image names.
+
+### 4. Deploy everything
+
+```bash
 make deploy
-
-# Or deploy step by step
-make deploy-monitoring    # Prometheus + Alertmanager + Grafana
-make deploy-apps         # Sample applications
-make deploy-operator     # Custom recovery operator
 ```
 
-### 2. Verify Deployment
+### 5. Access the services
 
 ```bash
-# Check all components are running
-kubectl get pods -A
-
-# Access Grafana (default: admin/admin)
-kubectl port-forward svc/grafana 3000:80
-
-# Access sample app
-kubectl port-forward svc/nodejs-app 8080:3000
+kubectl port-forward svc/grafana 3000:3000 -n monitoring      # http://localhost:3000 (admin/admin)
+kubectl port-forward svc/prometheus 9090:9090 -n monitoring   # http://localhost:9090
+kubectl port-forward svc/nodejs-app 8080:3000                  # http://localhost:8080
 ```
 
-### 3. Simulate Failures
+## Testing Self-Healing
 
 ```bash
-# Simulate high memory usage
-make simulate-memory
+# Simulate a memory leak - operator will restart the pod
+./scripts/simulate-failure.sh memory
 
-# Simulate pod crash loop
-make simulate-crash
+# Simulate a pod crash - Kubernetes restarts it, operator reacts to crash loop
+./scripts/simulate-failure.sh crash
 
-# Simulate 5xx errors
-make simulate-errors
+# Simulate high error rate - operator will restart the pod
+./scripts/simulate-failure.sh errors
+
+# Stop all simulations
+./scripts/simulate-failure.sh stop
+
+# Check what's running
+./scripts/simulate-failure.sh status
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 self-healing-infra-k8s/
-├── manifests/                 # Kubernetes manifests
-│   ├── apps/                 # Sample applications
-│   │   └── nodejs-app/       # Node.js app with metrics
-│   ├── monitoring/           # Monitoring stack
-│   │   ├── prometheus/       # Prometheus configuration
-│   │   ├── alertmanager/     # Alertmanager configuration
-│   │   └── grafana/          # Grafana dashboards
-│   └── operator/             # RBAC for custom operator
-├── operator/                 # Custom recovery operator
-│   ├── main.go              # Webhook receiver
-│   ├── Dockerfile           # Container image
-│   └── kustomization.yaml   # Deployment config
-├── apps/                     # Sample application source
-│   └── nodejs-metrics-app/   # Node.js app with health endpoints
-├── scripts/                  # Utility scripts
-│   ├── deploy.sh            # Deployment script
-│   └── simulate-failure.sh  # Failure simulation
-├── docs/                     # Documentation
-│   └── architecture.png     # Architecture diagram
-├── Makefile                  # Build and deployment commands
-└── README.md                # This file
+├── apps/nodejs-metrics-app/    # Sample Node.js app with Prometheus metrics
+│   ├── app.js                  # Express server with /metrics, /health, /simulate/* endpoints
+│   ├── package.json
+│   └── Dockerfile
+├── operator/                   # Self-healing webhook operator (Go)
+│   ├── main.go                 # Receives Alertmanager webhooks, executes recovery
+│   ├── go.mod
+│   └── Dockerfile
+├── manifests/
+│   ├── apps/nodejs-app/        # Kubernetes Deployment + Service for the app
+│   ├── monitoring/             # Prometheus, Alertmanager, Grafana configs + deployments
+│   └── operator/               # RBAC + Deployment for the operator
+├── scripts/
+│   ├── deploy.sh               # Full deploy script (alternative to make deploy)
+│   └── simulate-failure.sh     # Trigger failure scenarios
+└── Makefile                    # Convenience commands
 ```
 
-## 🔧 Configuration
+## Alert Rules
 
-### Alert Rules
+Defined in `manifests/monitoring/prometheus-rules.yaml`:
 
-The system includes pre-configured alert rules in `manifests/monitoring/prometheus-rules.yaml`:
+| Alert | Condition | Recovery Action |
+|-------|-----------|-----------------|
+| HighMemoryUsage | Container memory > 200Mi for 1m | restart pod |
+| PodCrashLooping | >3 restarts in 5 minutes | redeploy deployment |
+| HighErrorRate | >10% 5xx errors for 1m | restart pod |
+| HighCPUUsage | >80% CPU for 2m | scale up |
+| HealthCheckFailed | /health not responding for 1m | restart pod |
 
-- **HighMemoryUsage**: Triggers when container memory > 200Mi
-- **PodCrashLooping**: Triggers when pod restarts > 3 times
-- **HighErrorRate**: Triggers when 5xx error rate > 10%
+## Cleanup
 
-### Recovery Actions
-
-The custom operator supports these recovery actions:
-
-- `restart`: Delete the problematic pod (Kubernetes will recreate it)
-- `redeploy`: Trigger a rolling update of the deployment
-- `scale`: Scale the deployment up or down
-
-## 🧪 Testing Scenarios
-
-### Scenario 1: High Memory Usage
 ```bash
-make simulate-memory
-# Expected: Pod gets restarted automatically
+make clean
 ```
 
-### Scenario 2: Pod Crash Loop
+## Troubleshooting
+
 ```bash
-make simulate-crash
-# Expected: Deployment gets redeployed
+# Check operator logs to see what recovery actions are running
+kubectl logs -f -l app=self-healing-operator
+
+# Check if Alertmanager is receiving alerts
+kubectl port-forward svc/alertmanager 9093:9093 -n monitoring
+# Then open http://localhost:9093
+
+# Check Prometheus alert rules are loaded
+kubectl port-forward svc/prometheus 9090:9090 -n monitoring
+# Then open http://localhost:9090/alerts
 ```
-
-### Scenario 3: High Error Rate
-```bash
-make simulate-errors
-# Expected: Pod gets restarted
-```
-
-## 📊 Monitoring
-
-### Grafana Dashboards
-
-Access Grafana at `http://localhost:3000` (admin/admin) to view:
-
-- **Self-Healing Overview**: Overall system health and recovery actions
-- **Application Metrics**: Memory, CPU, and error rates
-- **Alert History**: Timeline of triggered alerts and recoveries
-
-### Prometheus Queries
-
-```promql
-# Memory usage by pod
-container_memory_usage_bytes{container="nodejs-app"}
-
-# Pod restart count
-kube_pod_container_status_restarts_total{container="nodejs-app"}
-
-# HTTP error rate
-rate(http_requests_total{status=~"5.."}[5m])
-```
-
-## 🔍 Troubleshooting
-
-### Check Operator Logs
-```bash
-kubectl logs -f deployment/self-healing-operator
-```
-
-### Check Alertmanager
-```bash
-kubectl port-forward svc/alertmanager 9093:9093
-# Access at http://localhost:9093
-```
-
-### Check Prometheus Rules
-```bash
-kubectl get prometheusrules -A
-kubectl describe prometheusrule self-healing-rules
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator)
-- [kube-prometheus-stack](https://github.com/prometheus-community/helm-charts)
-- [Kubernetes Client Go](https://github.com/kubernetes/client-go)
-
----
-
-**Made with ❤️ for resilient Kubernetes infrastructure**

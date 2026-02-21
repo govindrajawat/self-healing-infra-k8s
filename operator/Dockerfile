@@ -3,29 +3,24 @@ FROM golang:1.21-alpine AS builder
 WORKDIR /app
 
 # Copy go mod files
-COPY go.mod go.sum ./
+COPY go.mod ./
 
-# Download dependencies
-RUN go mod download
+# Download dependencies (go.sum will be generated if missing)
+RUN go mod tidy
 
-# Copy source code
-COPY . .
+# Copy source and build
+COPY main.go .
+RUN CGO_ENABLED=0 GOOS=linux go build -o operator .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
-
-# Final stage
-FROM alpine:latest
+# Minimal final image
+FROM alpine:3.19
 
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
+WORKDIR /app
 
-# Copy the binary from builder stage
-COPY --from=builder /app/main .
+COPY --from=builder /app/operator .
 
-# Expose port
 EXPOSE 8080
 
-# Run the binary
-CMD ["./main"] 
+CMD ["./operator"]

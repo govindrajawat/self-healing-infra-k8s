@@ -7,66 +7,68 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
+// Alert represents a single Alertmanager alert
 type Alert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
 	Status      string            `json:"status"`
-	StartsAt    time.Time         `json:"startsAt"`
-	EndsAt      time.Time         `json:"endsAt"`
 }
 
+// WebhookMessage is the payload sent by Alertmanager
 type WebhookMessage struct {
 	Alerts []Alert `json:"alerts"`
 }
 
+// RecoveryAction holds the parsed action details from an alert
 type RecoveryAction struct {
 	Action    string
 	Pod       string
 	Namespace string
 	App       string
-	Reason    string
+	AlertName string
 }
 
+// global k8s client - created once at startup
+var clientset *kubernetes.Clientset
+
 func main() {
-	log.Println("🚀 Starting Self-Healing Operator...")
-	
+	log.Println("Starting Self-Healing Operator...")
+
+	// Connect to the Kubernetes cluster using in-cluster config
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		log.Fatalf("Failed to get in-cluster config: %v", err)
+	}
+
+	clientset, err = kubernetes.NewForConfig(config)
+	if err != nil {
+		log.Fatalf("Failed to create Kubernetes client: %v", err)
+	}
+
+	log.Println("Connected to Kubernetes cluster")
+
 	http.HandleFunc("/webhook", handleWebhook)
 	http.HandleFunc("/health", handleHealth)
-	http.HandleFunc("/metrics", handleMetrics)
-	
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-	
-	log.Printf("📡 Webhook server listening on port %s", port)
+
+	log.Printf("Listening on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("healthy"))
-}
-
-func handleMetrics(w http.ResponseWriter, r *http.Request) {
-	// Simple metrics endpoint for monitoring the operator itself
-	metrics := fmt.Sprintf(`# HELP self_healing_operator_requests_total Total number of webhook requests
-# TYPE self_healing_operator_requests_total counter
-self_healing_operator_requests_total %d
-`, 0) // In a real implementation, you'd track this metric
-	
-	w.Header().Set("Content-Type", "text/plain")
-	w.Write([]byte(metrics))
 }
 
 func handleWebhook(w http.ResponseWriter, r *http.Request) {
@@ -77,32 +79,32 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	var msg WebhookMessage
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		log.Printf("❌ Error decoding webhook payload: %v", err)
+		log.Printf("Error decoding webhook payload: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("📨 Received %d alerts", len(msg.Alerts))
+	log.Printf("Received %d alert(s)", len(msg.Alerts))
 
 	for _, alert := range msg.Alerts {
-		// Only process firing alerts
+		// Only act on firing alerts
 		if alert.Status != "firing" {
 			continue
 		}
 
 		action := parseRecoveryAction(alert)
 		if action == nil {
-			log.Printf("⚠️  No recovery action found for alert: %s", alert.Labels["alertname"])
+			log.Printf("No recovery_action label on alert: %s", alert.Labels["alertname"])
 			continue
 		}
 
-		log.Printf("🔧 Executing recovery action: %s for %s/%s", action.Action, action.Namespace, action.Pod)
-		
-		success := executeRecoveryAction(*action)
-		if success {
-			log.Printf("✅ Recovery action completed successfully")
+		log.Printf("Executing recovery action '%s' for alert '%s' (namespace: %s, pod: %s)",
+			action.Action, action.AlertName, action.Namespace, action.Pod)
+
+		if err := executeRecoveryAction(action); err != nil {
+			log.Printf("Recovery action failed: %v", err)
 		} else {
-			log.Printf("❌ Recovery action failed")
+			log.Printf("Recovery action '%s' completed successfully", action.Action)
 		}
 	}
 
@@ -116,22 +118,19 @@ func parseRecoveryAction(alert Alert) *RecoveryAction {
 		return nil
 	}
 
-	// Extract pod name from alert labels
-	podName := alert.Labels["pod"]
-	if podName == "" {
-		podName = alert.Labels["kubernetes_pod_name"]
-	}
-
-	// Extract namespace
 	namespace := alert.Labels["namespace"]
 	if namespace == "" {
 		namespace = alert.Labels["kubernetes_namespace"]
 	}
 	if namespace == "" {
-		namespace = "default" // Default namespace
+		namespace = "default"
 	}
 
-	// Extract app name
+	pod := alert.Labels["pod"]
+	if pod == "" {
+		pod = alert.Labels["kubernetes_pod_name"]
+	}
+
 	app := alert.Labels["app"]
 	if app == "" {
 		app = "unknown"
@@ -139,78 +138,61 @@ func parseRecoveryAction(alert Alert) *RecoveryAction {
 
 	return &RecoveryAction{
 		Action:    recoveryAction,
-		Pod:       podName,
+		Pod:       pod,
 		Namespace: namespace,
 		App:       app,
-		Reason:    alert.Labels["alertname"],
+		AlertName: alert.Labels["alertname"],
 	}
 }
 
-func executeRecoveryAction(action RecoveryAction) bool {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		log.Printf("❌ Error getting in-cluster config: %v", err)
-		return false
-	}
-
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		log.Printf("❌ Error creating clientset: %v", err)
-		return false
-	}
-
+func executeRecoveryAction(action *RecoveryAction) error {
 	ctx := context.Background()
 
 	switch action.Action {
 	case "restart":
-		return restartPod(ctx, clientset, action)
+		return restartPod(ctx, action)
 	case "redeploy":
-		return redeployDeployment(ctx, clientset, action)
+		return redeployDeployment(ctx, action)
 	case "scale":
-		return scaleDeployment(ctx, clientset, action)
+		return scaleDeployment(ctx, action)
 	default:
-		log.Printf("⚠️  Unknown recovery action: %s", action.Action)
-		return false
+		return fmt.Errorf("unknown recovery action: %s", action.Action)
 	}
 }
 
-func restartPod(ctx context.Context, clientset *kubernetes.Clientset, action RecoveryAction) bool {
+// restartPod deletes the pod so Kubernetes recreates it
+func restartPod(ctx context.Context, action *RecoveryAction) error {
 	if action.Pod == "" {
-		log.Printf("❌ No pod name provided for restart action")
-		return false
+		return fmt.Errorf("no pod name in alert labels for restart action")
 	}
 
-	log.Printf("🔄 Restarting pod %s/%s", action.Namespace, action.Pod)
-	
+	log.Printf("Restarting pod %s/%s", action.Namespace, action.Pod)
+
 	err := clientset.CoreV1().Pods(action.Namespace).Delete(ctx, action.Pod, metav1.DeleteOptions{})
 	if err != nil {
-		log.Printf("❌ Error deleting pod %s/%s: %v", action.Namespace, action.Pod, err)
-		return false
+		return fmt.Errorf("failed to delete pod %s/%s: %v", action.Namespace, action.Pod, err)
 	}
 
-	log.Printf("✅ Successfully initiated restart of pod %s/%s", action.Namespace, action.Pod)
-	return true
+	log.Printf("Pod %s/%s deleted - Kubernetes will restart it", action.Namespace, action.Pod)
+	return nil
 }
 
-func redeployDeployment(ctx context.Context, clientset *kubernetes.Clientset, action RecoveryAction) bool {
-	// Find deployment by app label
+// redeployDeployment triggers a rolling restart by updating an annotation
+func redeployDeployment(ctx context.Context, action *RecoveryAction) error {
 	deployments, err := clientset.AppsV1().Deployments(action.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", action.App),
 	})
 	if err != nil {
-		log.Printf("❌ Error listing deployments: %v", err)
-		return false
+		return fmt.Errorf("failed to list deployments: %v", err)
 	}
 
 	if len(deployments.Items) == 0 {
-		log.Printf("❌ No deployment found for app %s in namespace %s", action.App, action.Namespace)
-		return false
+		return fmt.Errorf("no deployment found with label app=%s in namespace %s", action.App, action.Namespace)
 	}
 
 	deployment := deployments.Items[0]
-	log.Printf("🔄 Redeploying deployment %s/%s", action.Namespace, deployment.Name)
+	log.Printf("Triggering rolling restart of deployment %s/%s", action.Namespace, deployment.Name)
 
-	// Trigger rolling update by updating annotation
 	if deployment.Spec.Template.Annotations == nil {
 		deployment.Spec.Template.Annotations = make(map[string]string)
 	}
@@ -218,48 +200,48 @@ func redeployDeployment(ctx context.Context, clientset *kubernetes.Clientset, ac
 
 	_, err = clientset.AppsV1().Deployments(action.Namespace).Update(ctx, &deployment, metav1.UpdateOptions{})
 	if err != nil {
-		log.Printf("❌ Error updating deployment %s/%s: %v", action.Namespace, deployment.Name, err)
-		return false
+		return fmt.Errorf("failed to update deployment %s/%s: %v", action.Namespace, deployment.Name, err)
 	}
 
-	log.Printf("✅ Successfully initiated redeploy of deployment %s/%s", action.Namespace, deployment.Name)
-	return true
+	log.Printf("Rolling restart triggered for deployment %s/%s", action.Namespace, deployment.Name)
+	return nil
 }
 
-func scaleDeployment(ctx context.Context, clientset *kubernetes.Clientset, action RecoveryAction) bool {
-	// Find deployment by app label
+// scaleDeployment adds one more replica to the deployment
+func scaleDeployment(ctx context.Context, action *RecoveryAction) error {
 	deployments, err := clientset.AppsV1().Deployments(action.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("app=%s", action.App),
 	})
 	if err != nil {
-		log.Printf("❌ Error listing deployments: %v", err)
-		return false
+		return fmt.Errorf("failed to list deployments: %v", err)
 	}
 
 	if len(deployments.Items) == 0 {
-		log.Printf("❌ No deployment found for app %s in namespace %s", action.App, action.Namespace)
-		return false
+		return fmt.Errorf("no deployment found with label app=%s in namespace %s", action.App, action.Namespace)
 	}
 
 	deployment := deployments.Items[0]
-	currentReplicas := *deployment.Spec.Replicas
+
+	// Safe nil check: default to 1 if Replicas pointer is nil
+	currentReplicas := int32(1)
+	if deployment.Spec.Replicas != nil {
+		currentReplicas = *deployment.Spec.Replicas
+	}
 	newReplicas := currentReplicas + 1
 
-	log.Printf("📈 Scaling deployment %s/%s from %d to %d replicas", action.Namespace, deployment.Name, currentReplicas, newReplicas)
+	log.Printf("Scaling deployment %s/%s: %d -> %d replicas", action.Namespace, deployment.Name, currentReplicas, newReplicas)
 
 	scale, err := clientset.AppsV1().Deployments(action.Namespace).GetScale(ctx, deployment.Name, metav1.GetOptions{})
 	if err != nil {
-		log.Printf("❌ Error getting scale for deployment %s/%s: %v", action.Namespace, deployment.Name, err)
-		return false
+		return fmt.Errorf("failed to get scale for deployment %s/%s: %v", action.Namespace, deployment.Name, err)
 	}
 
-	scale.Spec.Replicas = int32(newReplicas)
+	scale.Spec.Replicas = newReplicas
 	_, err = clientset.AppsV1().Deployments(action.Namespace).UpdateScale(ctx, deployment.Name, scale, metav1.UpdateOptions{})
 	if err != nil {
-		log.Printf("❌ Error scaling deployment %s/%s: %v", action.Namespace, deployment.Name, err)
-		return false
+		return fmt.Errorf("failed to scale deployment %s/%s: %v", action.Namespace, deployment.Name, err)
 	}
 
-	log.Printf("✅ Successfully scaled deployment %s/%s to %d replicas", action.Namespace, deployment.Name, newReplicas)
-	return true
+	log.Printf("Deployment %s/%s scaled to %d replicas", action.Namespace, deployment.Name, newReplicas)
+	return nil
 }
